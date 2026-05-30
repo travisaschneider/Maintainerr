@@ -72,7 +72,7 @@ export class RadarrGetterService {
 
       if (lookupCandidates.length === 0) {
         this.logger.warn(
-          `Failed to resolve external IDs for '${libItem.title}' with id '${libItem.id}'. As a result, no Radarr query could be made.`,
+          `Failed to resolve external IDs for '${libItem.title}' (media server ID '${libItem.id}'). As a result, no Radarr query could be made.`,
         );
         return null;
       }
@@ -104,7 +104,7 @@ export class RadarrGetterService {
         const attemptedIds = formatMetadataLookupCandidates(lookupCandidates);
 
         this.logger.warn(
-          `None of the resolved external IDs [${attemptedIds}] for '${libItem.title}' matched a movie in Radarr.`,
+          `None of the resolved external IDs [${attemptedIds}] for '${libItem.title}' matched a movie in Radarr. Is the movie tracked in Radarr?`,
         );
         return null;
       }
