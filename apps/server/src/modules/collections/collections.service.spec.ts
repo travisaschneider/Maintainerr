@@ -1,4 +1,8 @@
-import { MediaServerFeature, MediaServerType } from '@maintainerr/contracts';
+import {
+  MediaCollection,
+  MediaServerFeature,
+  MediaServerType,
+} from '@maintainerr/contracts';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Mocked, TestBed } from '@suites/unit';
 import { DataSource, Repository } from 'typeorm';
@@ -65,9 +69,11 @@ describe('CollectionsService', () => {
         .fn()
         .mockResolvedValue({ id: 'remote-collection' }),
       addBatchToCollection: jest.fn().mockResolvedValue([]),
+      removeBatchFromCollection: jest.fn().mockResolvedValue([]),
       getCollection: jest.fn().mockResolvedValue(undefined),
       getCollectionChildren: jest.fn().mockResolvedValue([]),
       getMetadata: jest.fn().mockResolvedValue(undefined),
+      itemExists: jest.fn().mockResolvedValue(true),
       removeFromCollection: jest.fn().mockResolvedValue(undefined),
       deleteCollection: jest.fn().mockResolvedValue(undefined),
     } as unknown as Mocked<IMediaServerService>;
@@ -84,6 +90,132 @@ describe('CollectionsService', () => {
     jest
       .spyOn(service, 'updateCollectionTotalSize')
       .mockResolvedValue(undefined);
+  });
+
+  describe('removeMediaFromOtherCollections', () => {
+    it('prunes the item from sibling collections, deduped and excluding the source', async () => {
+      collectionMediaRepo.find.mockResolvedValue([
+        { collectionId: 1, mediaServerId: 'item-1' },
+        { collectionId: 2, mediaServerId: 'item-1' },
+        { collectionId: 2, mediaServerId: 'item-1' },
+        { collectionId: 3, mediaServerId: 'item-1' },
+      ] as CollectionMedia[]);
+      collectionRepo.find.mockResolvedValue([
+        createCollection({ id: 2, mediaServerId: 'remote-collection-2' }),
+        createCollection({ id: 3, mediaServerId: 'remote-collection-3' }),
+      ] as Collection[]);
+
+      const removeSpy = jest
+        .spyOn(service as never, 'removeFromCollectionInternal')
+        .mockResolvedValue(createCollection() as never);
+
+      const pruned = await service.removeMediaFromOtherCollections('item-1', 1);
+
+      expect(collectionMediaRepo.find).toHaveBeenCalledWith({
+        where: { mediaServerId: 'item-1' },
+      });
+      expect(collectionRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: expect.anything(),
+          }),
+        }),
+      );
+      // Collection 1 is the source (excluded); 2 (deduped to one call) and 3
+      // are the siblings that still listed the now-deleted item.
+      expect(mediaServer.removeBatchFromCollection).toHaveBeenCalledTimes(2);
+      expect(mediaServer.removeBatchFromCollection).toHaveBeenCalledWith(
+        'remote-collection-2',
+        ['item-1'],
+      );
+      expect(mediaServer.removeBatchFromCollection).toHaveBeenCalledWith(
+        'remote-collection-3',
+        ['item-1'],
+      );
+      expect(removeSpy).toHaveBeenCalledTimes(2);
+      expect(removeSpy).toHaveBeenCalledWith(
+        2,
+        [{ mediaServerId: 'item-1' }],
+        false,
+        'all',
+        true,
+      );
+      expect(removeSpy).toHaveBeenCalledWith(
+        3,
+        [{ mediaServerId: 'item-1' }],
+        false,
+        'all',
+        true,
+      );
+      // Returns the pruned sibling ids so the caller can suppress re-adds.
+      expect(pruned).toEqual([2, 3]);
+    });
+
+    it('removes a shared media-server collection only once before pruning each local sibling', async () => {
+      collectionMediaRepo.find.mockResolvedValue([
+        { collectionId: 1, mediaServerId: 'item-1' },
+        { collectionId: 2, mediaServerId: 'item-1' },
+        { collectionId: 3, mediaServerId: 'item-1' },
+      ] as CollectionMedia[]);
+      collectionRepo.find.mockResolvedValue([
+        createCollection({ id: 2, mediaServerId: 'shared-remote-collection' }),
+        createCollection({ id: 3, mediaServerId: 'shared-remote-collection' }),
+      ] as Collection[]);
+
+      const removeSpy = jest
+        .spyOn(service as never, 'removeFromCollectionInternal')
+        .mockResolvedValue(createCollection() as never);
+
+      const pruned = await service.removeMediaFromOtherCollections('item-1', 1);
+
+      expect(mediaServer.removeBatchFromCollection).toHaveBeenCalledTimes(1);
+      expect(mediaServer.removeBatchFromCollection).toHaveBeenCalledWith(
+        'shared-remote-collection',
+        ['item-1'],
+      );
+      expect(removeSpy).toHaveBeenCalledTimes(2);
+      expect(pruned).toEqual([2, 3]);
+    });
+
+    it('skips local pruning when the shared media-server removal fails', async () => {
+      collectionMediaRepo.find.mockResolvedValue([
+        { collectionId: 1, mediaServerId: 'item-1' },
+        { collectionId: 2, mediaServerId: 'item-1' },
+        { collectionId: 3, mediaServerId: 'item-1' },
+      ] as CollectionMedia[]);
+      collectionRepo.find.mockResolvedValue([
+        createCollection({ id: 2, mediaServerId: 'shared-remote-collection' }),
+        createCollection({ id: 3, mediaServerId: 'shared-remote-collection' }),
+      ] as Collection[]);
+      mediaServer.removeBatchFromCollection.mockResolvedValue(['item-1']);
+
+      const removeSpy = jest
+        .spyOn(service as never, 'removeFromCollectionInternal')
+        .mockResolvedValue(createCollection() as never);
+
+      await expect(
+        service.removeMediaFromOtherCollections('item-1', 1),
+      ).resolves.toEqual([]);
+
+      expect(removeSpy).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when no other collection lists the item', async () => {
+      collectionMediaRepo.find.mockResolvedValue([
+        { collectionId: 1, mediaServerId: 'item-1' },
+      ] as CollectionMedia[]);
+
+      const removeSpy = jest
+        .spyOn(service as never, 'removeFromCollectionInternal')
+        .mockResolvedValue(createCollection() as never);
+
+      await expect(
+        service.removeMediaFromOtherCollections('item-1', 1),
+      ).resolves.toEqual([]);
+
+      expect(removeSpy).not.toHaveBeenCalled();
+      expect(collectionRepo.find).not.toHaveBeenCalled();
+    });
   });
 
   it('persists overlay settings when creating a collection', async () => {
@@ -1911,5 +2043,125 @@ describe('CollectionsService', () => {
       'remote-99',
       ['leaves-soonest', 'leaves-middle', 'leaves-latest'],
     );
+  });
+
+  describe('removeStaleCollectionMedia', () => {
+    const buildMedia = (id: number, mediaServerId: string) =>
+      Object.assign(new CollectionMedia(), { id, mediaServerId });
+
+    it('removes only the rows the server confirms are gone', async () => {
+      collectionMediaRepo.find.mockResolvedValue([
+        buildMedia(1, 'present'),
+        buildMedia(2, 'gone'),
+      ]);
+      mediaServer.itemExists.mockImplementation(async (id) => id !== 'gone');
+
+      await service.removeStaleCollectionMedia();
+
+      expect(collectionMediaRepo.delete).toHaveBeenCalledTimes(1);
+      expect(collectionMediaRepo.delete).toHaveBeenCalledWith(2);
+    });
+
+    it('keeps the row when the existence check is inconclusive (throws)', async () => {
+      collectionMediaRepo.find.mockResolvedValue([buildMedia(1, 'maybe')]);
+      // A transient failure must never be read as "gone".
+      mediaServer.itemExists.mockRejectedValue(new Error('media server down'));
+
+      await service.removeStaleCollectionMedia();
+
+      expect(collectionMediaRepo.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findMediaServerCollection', () => {
+    const boxset = (props: Partial<MediaCollection>): MediaCollection =>
+      ({ id: 'box-1', title: 'Shared', smart: false, ...props }) as never;
+
+    beforeEach(() => {
+      mediaServer.getCollections = jest.fn().mockResolvedValue([]);
+      mediaServer.getLibraries = jest.fn().mockResolvedValue([
+        { id: 'movies', title: 'Movies', type: 'movie' },
+        { id: 'shows', title: 'Shows', type: 'show' },
+      ]);
+    });
+
+    it('returns a match from the requested library without searching others', async () => {
+      mediaServer.getCollections.mockResolvedValue([
+        boxset({ title: 'Shared' }),
+      ]);
+
+      const found = await service.findMediaServerCollection('Shared', 'shows');
+
+      expect(found?.id).toBe('box-1');
+      expect(mediaServer.getCollections).toHaveBeenCalledTimes(1);
+      expect(mediaServer.getCollections).toHaveBeenCalledWith('shows');
+      expect(mediaServer.getLibraries).not.toHaveBeenCalled();
+    });
+
+    it('ignores smart collections when matching by name', async () => {
+      mediaServer.getCollections.mockResolvedValue([
+        boxset({ title: 'Shared', smart: true }),
+      ]);
+
+      const found = await service.findMediaServerCollection('Shared', 'shows');
+
+      expect(found).toBeUndefined();
+    });
+
+    it('falls back to other libraries for a cross-library server when opted in', async () => {
+      // The shared boxset is only reported under the movie library (it holds
+      // movies but no shows yet), mirroring the reported Emby/Jellyfin issue.
+      mediaServer.supportsFeature.mockImplementation(
+        (feature) => feature === MediaServerFeature.CROSS_LIBRARY_COLLECTIONS,
+      );
+      mediaServer.getCollections.mockImplementation(
+        async (libraryId: string) =>
+          libraryId === 'movies' ? [boxset({ title: 'Shared' })] : [],
+      );
+
+      const found = await service.findMediaServerCollection(
+        'Shared',
+        'shows',
+        true,
+      );
+
+      expect(found?.id).toBe('box-1');
+      // Own library searched first, then the other one — never re-searching it.
+      expect(mediaServer.getCollections).toHaveBeenCalledWith('shows');
+      expect(mediaServer.getCollections).toHaveBeenCalledWith('movies');
+      expect(mediaServer.getCollections).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not search other libraries when not opted in', async () => {
+      mediaServer.supportsFeature.mockImplementation(
+        (feature) => feature === MediaServerFeature.CROSS_LIBRARY_COLLECTIONS,
+      );
+      mediaServer.getCollections.mockImplementation(
+        async (libraryId: string) =>
+          libraryId === 'movies' ? [boxset({ title: 'Shared' })] : [],
+      );
+
+      const found = await service.findMediaServerCollection('Shared', 'shows');
+
+      expect(found).toBeUndefined();
+      expect(mediaServer.getLibraries).not.toHaveBeenCalled();
+    });
+
+    it('does not search other libraries when the server lacks cross-library collections (Plex)', async () => {
+      mediaServer.supportsFeature.mockReturnValue(false);
+      mediaServer.getCollections.mockImplementation(
+        async (libraryId: string) =>
+          libraryId === 'movies' ? [boxset({ title: 'Shared' })] : [],
+      );
+
+      const found = await service.findMediaServerCollection(
+        'Shared',
+        'shows',
+        true,
+      );
+
+      expect(found).toBeUndefined();
+      expect(mediaServer.getLibraries).not.toHaveBeenCalled();
+    });
   });
 });

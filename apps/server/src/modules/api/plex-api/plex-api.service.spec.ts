@@ -141,6 +141,37 @@ describe('PlexApiService.getMetadata', () => {
     );
   });
 
+  it('queries the live sessions endpoint without caching', async () => {
+    const query = jest.fn().mockResolvedValue({
+      MediaContainer: { Metadata: [{ ratingKey: '123' }] },
+    });
+
+    (service as any).plexClient = { query };
+
+    const result = await service.getActiveSessions();
+
+    expect(query).toHaveBeenCalledWith({ uri: '/status/sessions' }, false);
+    expect(result).toEqual([{ ratingKey: '123' }]);
+  });
+
+  it('returns an empty array when nothing is playing (no Metadata)', async () => {
+    const query = jest.fn().mockResolvedValue({
+      MediaContainer: { size: 0 },
+    });
+
+    (service as any).plexClient = { query };
+
+    expect(await service.getActiveSessions()).toEqual([]);
+  });
+
+  it('returns an empty array when the sessions query fails', async () => {
+    const query = jest.fn().mockRejectedValue(new Error('boom'));
+
+    (service as any).plexClient = { query };
+
+    expect(await service.getActiveSessions()).toEqual([]);
+  });
+
   it('builds a single encoded collection uri when adding multiple children', async () => {
     const putQuery = jest.fn().mockResolvedValue({
       MediaContainer: { Metadata: [{ ratingKey: '123' }] },
@@ -567,6 +598,21 @@ describe('PlexApiService.initialize', () => {
 
     expect(logger.error).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith('Plex status probe failed');
+  });
+
+  it('probes /identity (not bare /) so it works behind reverse proxies', async () => {
+    jest.restoreAllMocks();
+    // Bare `/` 401s behind reverse proxies; `/identity` returns the same
+    // machineIdentifier + version without auth quirks.
+    const query = jest.fn().mockResolvedValue({
+      MediaContainer: { machineIdentifier: 'm1', version: '1.43.2' },
+    });
+    (service as any).plexClient = { query };
+
+    const status = await service.getStatus();
+
+    expect(query).toHaveBeenCalledWith('/identity', false);
+    expect(status).toEqual({ machineIdentifier: 'm1', version: '1.43.2' });
   });
 });
 

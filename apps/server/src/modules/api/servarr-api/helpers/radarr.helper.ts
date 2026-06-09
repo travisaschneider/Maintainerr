@@ -66,6 +66,15 @@ export class RadarrApi extends ServarrApi<{ movieId: number }> {
     }
   }
 
+  /**
+   * Resolve the torrent infohashes (download-client `downloadId`s) that produced
+   * this movie's files, from Radarr's history. Used to clean up the matching
+   * torrents in the download client after a delete.
+   */
+  public async getDownloadIdsForMovie(movieId: number): Promise<string[]> {
+    return this.getDownloadIdsFromHistory(`/history/movie?movieId=${movieId}`);
+  }
+
   public async searchMovie(movieId: number): Promise<void> {
     this.logger.log('Executing movie search command');
 
@@ -135,16 +144,29 @@ export class RadarrApi extends ServarrApi<{ movieId: number }> {
       }
 
       if (options?.addImportExclusion) {
-        const exclusion = await this.post<RadarrImportListExclusion>(
-          `/exclusions`,
-          {
-            tmdbId: movieData.tmdbId,
-            movieTitle: movieData.title,
-            movieYear: movieData.year,
-          } satisfies RadarrImportListExclusion,
+        // Use the bulk endpoint, not the singular POST /exclusions: the latter
+        // runs a validator that rejects an already-excluded movie with HTTP 400
+        // ("This exclusion has already been added"), which would fail the whole
+        // collection run on every re-run. /exclusions/bulk skips that validator
+        // and de-dupes server-side (the same idempotent behaviour as Radarr's
+        // movie-delete path and Sonarr's exclusion handling), so re-adding is a
+        // no-op.
+        const result = await this.post<RadarrImportListExclusion[]>(
+          `/exclusions/bulk`,
+          [
+            {
+              tmdbId: movieData.tmdbId,
+              movieTitle: movieData.title,
+              movieYear: movieData.year,
+            } satisfies RadarrImportListExclusion,
+          ],
         );
 
-        if (!exclusion) {
+        // post() returns the body on success and undefined only on a failed
+        // request. Radarr's bulk endpoint documents 200 with no response schema,
+        // so a successful add can have an empty body ('') — check for undefined
+        // rather than falsiness so an empty-body success isn't read as failure.
+        if (result === undefined) {
           return false;
         }
       }

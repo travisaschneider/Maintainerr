@@ -1049,8 +1049,19 @@ export class CollectionsService {
     let removedCount = 0;
 
     for (const entry of allMedia) {
-      const metadata = await mediaServer.getMetadata(entry.mediaServerId);
-      if (!metadata?.id) {
+      // Only remove a row when the media server *confirms* the item is gone.
+      // `itemExists` returns false solely on a 404/empty result and throws on
+      // an inconclusive check (network / 5xx / auth), unlike `getMetadata`
+      // which returns undefined for both absent and failed reads — so a
+      // transient blip can no longer delete a still-present item's row.
+      let exists = true;
+      try {
+        exists = await mediaServer.itemExists(entry.mediaServerId);
+      } catch (error) {
+        this.logger.debug(error);
+      }
+
+      if (!exists) {
         await this.CollectionMediaRepo.delete(entry.id);
         removedCount++;
       }
@@ -1498,6 +1509,7 @@ export class CollectionsService {
         const foundCollection = await this.findMediaServerCollection(
           collection.manualCollectionName,
           collection.libraryId,
+          true,
         );
         if (foundCollection) {
           // Handle visibility settings (Plex-only feature)
@@ -1730,6 +1742,7 @@ export class CollectionsService {
       const foundColl = await this.findMediaServerCollection(
         collection.manualCollectionName,
         collection.libraryId,
+        true,
       );
       if (foundColl) {
         collection.mediaServerId = foundColl.id;
@@ -2006,6 +2019,7 @@ export class CollectionsService {
             newColl = await this.findMediaServerCollection(
               collection.manualCollectionName,
               collection.libraryId,
+              true,
             );
           } else {
             newColl = await this.findMediaServerCollection(
@@ -2236,11 +2250,109 @@ export class CollectionsService {
     );
   }
 
+  /**
+   * Drop a media-server item from every managed collection that still lists
+   * it, except `excludeCollectionId` (the collection that just handled it).
+   *
+   * Called after a delete-style action frees the underlying file. The item
+   * still resolves on the media server at this point, so removing it from the
+   * sibling BoxSets now — while we still have a valid id to remove — keeps the
+   * media server from holding unresolved linked-item paths once the library
+   * drops the item on its next scan. Those dead links are what Jellyfin
+   * re-resolves on every rule run, producing the "Unable to find linked item
+   * at path" warning storm and the Jellyfin CPU spike in #3023. Once the item
+   * is gone there is no id left to remove, so this is the only window to clean
+   * the sibling memberships.
+   *
+   * Returns the ids of the sibling collections it pruned, so the caller can
+   * mark the item recently-handled for each of them — otherwise the rule
+   * executor's next pass re-adds it (the id still resolves and conditions like
+   * `isWatched` stay true), recreating the membership this just removed.
+   */
+  async removeMediaFromOtherCollections(
+    mediaServerId: string,
+    excludeCollectionId: number,
+  ): Promise<number[]> {
+    const memberships = await this.CollectionMediaRepo.find({
+      where: { mediaServerId },
+    });
+
+    const otherCollectionIds = [
+      ...new Set(
+        memberships
+          .map((membership) => membership.collectionId)
+          .filter((collectionId) => collectionId !== excludeCollectionId),
+      ),
+    ];
+
+    if (otherCollectionIds.length === 0) {
+      return [];
+    }
+
+    const siblingCollections = await this.collectionRepo.find({
+      where: { id: In(otherCollectionIds) },
+    });
+    const siblingCollectionById = new Map(
+      siblingCollections.map((collection) => [collection.id, collection]),
+    );
+    const siblingCollectionsByMediaServerId = new Map<string, Collection[]>();
+
+    for (const collectionId of otherCollectionIds) {
+      const siblingCollection = siblingCollectionById.get(collectionId);
+
+      if (!siblingCollection) {
+        continue;
+      }
+
+      const groupKey = siblingCollection.mediaServerId ?? `db:${collectionId}`;
+      const group =
+        siblingCollectionsByMediaServerId.get(groupKey) ?? ([] as Collection[]);
+
+      group.push(siblingCollection);
+      siblingCollectionsByMediaServerId.set(groupKey, group);
+    }
+
+    const mediaServer = await this.getMediaServer();
+    const prunedCollectionIds: number[] = [];
+
+    for (const siblingCollectionsGroup of siblingCollectionsByMediaServerId.values()) {
+      const representativeCollection = siblingCollectionsGroup[0];
+
+      if (representativeCollection.mediaServerId) {
+        const failedItemIds = await mediaServer.removeBatchFromCollection(
+          representativeCollection.mediaServerId,
+          [mediaServerId],
+        );
+
+        if (failedItemIds.includes(mediaServerId)) {
+          this.logger.warn(
+            `Couldn't prune media ${mediaServerId} from sibling collection ${representativeCollection.mediaServerId}`,
+          );
+          continue;
+        }
+      }
+
+      for (const siblingCollection of siblingCollectionsGroup) {
+        await this.removeFromCollectionInternal(
+          siblingCollection.id,
+          [{ mediaServerId }],
+          false,
+          'all',
+          true,
+        );
+        prunedCollectionIds.push(siblingCollection.id);
+      }
+    }
+
+    return prunedCollectionIds;
+  }
+
   private async removeFromCollectionInternal(
     collectionDbId: number,
     media: CollectionMediaChange[],
     skipAutomaticLinkCheck = false,
     removalScope: CollectionMediaRemovalScope = 'all',
+    skipMediaServerRemove = false,
   ): Promise<Collection | undefined> {
     try {
       const mediaServer = await this.getMediaServer();
@@ -2298,6 +2410,7 @@ export class CollectionsService {
                     dbId: collection.id,
                   },
                   childrenMedia,
+                  skipMediaServerRemove,
                 ),
               )
             : new Set<string>();
@@ -2821,6 +2934,7 @@ export class CollectionsService {
   private async removeChildrenFromCollection(
     collectionIds: { mediaServerId: string | null; dbId: number },
     childrenMedia: CollectionMediaChange[],
+    skipMediaServerRemove = false,
   ): Promise<string[]> {
     if (childrenMedia.length === 0) return [];
 
@@ -2829,7 +2943,7 @@ export class CollectionsService {
     );
 
     let failedItemIds = new Set<string>();
-    if (collectionIds.mediaServerId) {
+    if (collectionIds.mediaServerId && !skipMediaServerRemove) {
       const mediaServer = await this.getMediaServer();
       failedItemIds = new Set(
         await mediaServer.removeBatchFromCollection(
@@ -2996,6 +3110,7 @@ export class CollectionsService {
   public async findMediaServerCollection(
     name: string,
     libraryId: string,
+    searchAllLibraries = false,
   ): Promise<MediaCollection | undefined> {
     // Cannot search for collections without a valid library ID
     if (!libraryId || libraryId === '') {
@@ -3007,13 +3122,58 @@ export class CollectionsService {
 
     try {
       const mediaServer = await this.getMediaServer();
-      const collections = await mediaServer.getCollections(libraryId);
-      if (collections) {
-        const found = collections.find((coll) => {
-          return coll.title.trim() === name.trim() && !coll.smart;
-        });
+
+      // Primary lookup: the collection's own library.
+      const found = await this.matchCollectionInLibrary(
+        mediaServer,
+        name,
+        libraryId,
+      );
+      if (found) {
         return found;
       }
+
+      // Fallback for manual collections on servers where a single collection
+      // can span libraries (Jellyfin/Emby BoxSets are server-global; Plex
+      // collections are bound to one library). A manual collection reused
+      // across e.g. a movie rule and a show rule may currently hold items from
+      // one library only, so the server reports it under that library alone and
+      // the own-library lookup misses. Search the remaining libraries so the
+      // shared collection can still be located; once seeded it becomes
+      // discoverable under its own library on subsequent runs.
+      //
+      // getLibraries() already returns only movie/show libraries (never
+      // music/photos), so the search stays scoped to relevant types. The
+      // movie<->show crossover is intentional and required: a BoxSet is one
+      // server-global container that can hold both, and this fallback exists
+      // precisely to let a show rule find a BoxSet currently populated with
+      // movies only. Do not narrow this to the collection's own type — that
+      // would reintroduce the bug. Matching reuses matchCollectionInLibrary so
+      // the primary and fallback share one comparison; the name match only
+      // bootstraps the first link, after which the stored mediaServerId is used.
+      if (
+        searchAllLibraries &&
+        mediaServer.supportsFeature(
+          MediaServerFeature.CROSS_LIBRARY_COLLECTIONS,
+        )
+      ) {
+        const libraries = await mediaServer.getLibraries();
+        for (const library of libraries) {
+          if (library.id === libraryId) {
+            continue;
+          }
+          const crossLibraryMatch = await this.matchCollectionInLibrary(
+            mediaServer,
+            name,
+            library.id,
+          );
+          if (crossLibraryMatch) {
+            return crossLibraryMatch;
+          }
+        }
+      }
+
+      return undefined;
     } catch (error) {
       this.logger.warn(
         'An error occurred while searching for a specific collection.',
@@ -3021,6 +3181,21 @@ export class CollectionsService {
       this.logger.debug(error);
       return undefined;
     }
+  }
+
+  private async matchCollectionInLibrary(
+    mediaServer: IMediaServerService,
+    name: string,
+    libraryId: string,
+  ): Promise<MediaCollection | undefined> {
+    const collections = await mediaServer.getCollections(libraryId);
+    if (!collections) {
+      return undefined;
+    }
+    const target = name.trim();
+    return collections.find(
+      (coll) => coll.title.trim() === target && !coll.smart,
+    );
   }
 
   async getCollectionLogsWithPaging(

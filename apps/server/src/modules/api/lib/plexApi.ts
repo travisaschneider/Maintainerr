@@ -1,7 +1,7 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
-import axiosRetry from 'axios-retry';
 import { PlexLibraryResponse } from '../plex-api/interfaces/library.interfaces';
 import cacheManager, { Cache } from './cache';
+import { applyHttpRetry } from './httpRetry';
 import { describeRequestTarget } from './requestLogging';
 
 type PlexApiOptions = {
@@ -37,10 +37,7 @@ class PlexApi {
         'X-Plex-Token': this.options.token,
       },
     });
-    axiosRetry(this.axios, {
-      retries: 3,
-      retryDelay: axiosRetry.exponentialDelay,
-    });
+    applyHttpRetry(this.axios);
   }
 
   async query<T>(
@@ -245,8 +242,10 @@ class PlexApi {
 
   public async getStatus(): Promise<boolean> {
     try {
+      // `/identity` (not `/`): returns the server MediaContainer without the
+      // 401 that bare `/` gives behind reverse proxies.
       const status: { MediaContainer: any } = await this.query(
-        { uri: `/` },
+        { uri: `/identity` },
         false,
       );
       return status?.MediaContainer ? true : false;

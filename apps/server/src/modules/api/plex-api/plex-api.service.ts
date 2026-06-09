@@ -51,14 +51,6 @@ import {
 } from './interfaces/server.interface';
 import { PLEX_PAGE_SIZE, PLEX_REQUEST_TIMEOUT_MS } from './plex-api.constants';
 
-type PlexDiscoverUserState = Record<string, unknown>;
-
-type PlexDiscoverUserStateResponse = {
-  MediaContainer: {
-    UserState: PlexDiscoverUserState;
-  };
-};
-
 @Injectable()
 export class PlexApiService {
   private plexClient: PlexApi;
@@ -343,8 +335,12 @@ export class PlexApiService {
         this.logger.debug('Plex client not initialized, skipping getStatus');
         return undefined;
       }
+      // Probe `/identity`, not `/`: it returns machineIdentifier + version
+      // without auth quirks. Bare `/` returns 401 behind reverse proxies (it
+      // redirects to the web UI), which would break connection/machine-id
+      // detection for proxied servers.
       const response: PlexStatusResponse = await this.plexClient.query(
-        '/',
+        '/identity',
         false,
       );
       return response.MediaContainer;
@@ -626,32 +622,6 @@ export class PlexApiService {
     );
   }
 
-  public async getDiscoverDataUserState(
-    metaDataRatingKey: string,
-  ): Promise<PlexDiscoverUserState | undefined> {
-    const settings = this.getDbSettings();
-
-    try {
-      const response = await axios.get<PlexDiscoverUserStateResponse>(
-        `https://discover.provider.plex.tv/library/metadata/${metaDataRatingKey}/userState`,
-        {
-          headers: {
-            'content-type': 'application/json',
-            'X-Plex-Token': settings.auth_token,
-          },
-        },
-      );
-
-      return response.data.MediaContainer.UserState;
-    } catch (error) {
-      this.logger.error(
-        "Outbound call to discover.provider.plex.tv failed. Couldn't fetch userState",
-      );
-      this.logger.debug(error);
-      return undefined;
-    }
-  }
-
   public async getUserDataFromPlexTv(): Promise<PlexTvUser[] | undefined> {
     try {
       const response = await this.plexTvClient.getUsers();
@@ -735,6 +705,29 @@ export class PlexApiService {
         useCache,
       );
     return (response?.MediaContainer?.Metadata as PlexSeenBy[]) ?? [];
+  }
+
+  /**
+   * Returns the items in every active play session. Plex's
+   * `/status/sessions` returns only the `MediaContainer` (no `Metadata`) when
+   * nothing is playing, so an empty array is the normal "idle" result. Never
+   * cached — sessions are live state. Best-effort: the plexClient retries
+   * transient failures (axios-retry, exponential backoff), and a persistent
+   * failure returns [] so a session outage degrades to normal handling rather
+   * than blocking the run.
+   */
+  public async getActiveSessions(): Promise<PlexLibraryItem[]> {
+    try {
+      const response = await this.plexClient.query<PlexLibraryResponse>(
+        { uri: '/status/sessions' },
+        false,
+      );
+      return (response?.MediaContainer?.Metadata as PlexLibraryItem[]) ?? [];
+    } catch (error) {
+      this.logger.error('Failed to fetch active Plex sessions.');
+      this.logger.debug(error);
+      return [];
+    }
   }
 
   public async getCollections(
@@ -1194,11 +1187,11 @@ export class PlexApiService {
         this.loggerFactory.createLogger(),
       );
 
-      const devices = (await this.plexTvClient?.getDevices())?.filter(
-        (device) => {
-          return device.provides.includes('server') && device.owned;
-        },
-      );
+      const devices = (
+        await this.plexTvClient?.getDevices(settings.clientId)
+      )?.filter((device) => {
+        return device.provides.includes('server') && device.owned;
+      });
 
       if (devices) {
         await Promise.all(

@@ -310,6 +310,19 @@ export class RulesService {
     }
   }
 
+  // Resolve the collection's media type: a movie library is always 'movie';
+  // a TV library uses the rule group's selected dataType (show/season/episode),
+  // defaulting to 'show'.
+  private resolveCollectionType(
+    libType: MediaItemType,
+    params: RulesDto,
+  ): MediaItemType {
+    if (libType === 'movie') {
+      return 'movie';
+    }
+    return params.dataType !== undefined ? params.dataType : 'show';
+  }
+
   async setRules(params: RulesDto) {
     try {
       let state: ReturnStatus = this.createReturnStatus(true, 'Success');
@@ -344,21 +357,22 @@ export class RulesService {
       const lib = (await mediaServer.getLibraries()).find(
         (el) => el.id === params.libraryId,
       );
+      const collectionType = this.resolveCollectionType(lib.type, params);
       const collection = (
         await this.collectionService.createCollection({
           libraryId: params.libraryId,
-          type:
-            lib.type === 'movie'
-              ? 'movie'
-              : params.dataType !== undefined
-                ? params.dataType
-                : 'show',
+          type: collectionType,
           title: params.name,
           description: params.description,
           arrAction: params.arrAction ? params.arrAction : 0,
           isActive: params.isActive,
           listExclusions: params.listExclusions ? params.listExclusions : false,
-          forceSeerr: params.forceSeerr ? params.forceSeerr : false,
+          // Force Seerr is unsupported for episode rules (Seerr has no
+          // per-episode request granularity), so never persist it enabled. The
+          // UI hides the toggle; this also clears the flag on re-save for rules
+          // created before it was hidden.
+          forceSeerr:
+            collectionType !== 'episode' && params.forceSeerr ? true : false,
           tautulliWatchedPercentOverride:
             params.tautulliWatchedPercentOverride ?? null,
           radarrSettingsId: params.radarrSettingsId ?? null,
@@ -370,7 +384,7 @@ export class RulesService {
           deleteAfterDays: params.collection?.deleteAfterDays ?? null,
           manualCollection: params.collection?.manualCollection,
           manualCollectionName: params.collection?.manualCollectionName,
-          keepLogsForMonths: +params.collection?.keepLogsForMonths,
+          keepLogsForMonths: params.collection?.keepLogsForMonths ?? 6,
           sortTitle: params.collection?.sortTitle,
           mediaServerSort: params.collection?.mediaServerSort ?? null,
           overlayEnabled: params.collection?.overlayEnabled,
@@ -379,7 +393,7 @@ export class RulesService {
       )?.dbCollection;
 
       if (!collection) {
-        return undefined;
+        return this.createReturnStatus(false, 'Failed to create collection');
       }
 
       const groupId = await this.createOrUpdateGroup(
@@ -414,7 +428,7 @@ export class RulesService {
     } catch (error) {
       this.logger.warn('Rules - Action failed');
       this.logger.debug(error);
-      return undefined;
+      return this.createReturnStatus(false, 'Failed to save the rule group');
     }
   }
 
@@ -463,9 +477,11 @@ export class RulesService {
         if (
           dbCollection &&
           (group.dataType !== params.dataType ||
-            params.collection.manualCollection !==
+            (params.collection?.manualCollection ??
+              dbCollection.manualCollection) !==
               dbCollection.manualCollection ||
-            params.collection.manualCollectionName !==
+            (params.collection?.manualCollectionName ??
+              dbCollection.manualCollectionName) !==
               dbCollection.manualCollectionName ||
             params.libraryId !== dbCollection.libraryId)
         ) {
@@ -518,32 +534,43 @@ export class RulesService {
           (el) => el.id === params.libraryId,
         );
 
+        const collectionType = this.resolveCollectionType(lib.type, params);
         const collectionData = {
           libraryId: params.libraryId,
-          type:
-            lib.type === 'movie'
-              ? 'movie'
-              : params.dataType !== undefined
-                ? params.dataType
-                : 'show',
+          type: collectionType,
           title: params.name,
           description: params.description,
           arrAction: params.arrAction ? params.arrAction : 0,
           isActive: params.isActive,
           listExclusions: params.listExclusions ? params.listExclusions : false,
-          forceSeerr: params.forceSeerr ? params.forceSeerr : false,
+          // Force Seerr is unsupported for episode rules (Seerr has no
+          // per-episode request granularity), so never persist it enabled. The
+          // UI hides the toggle; this also clears the flag on re-save for rules
+          // created before it was hidden.
+          forceSeerr:
+            collectionType !== 'episode' && params.forceSeerr ? true : false,
           tautulliWatchedPercentOverride:
             params.tautulliWatchedPercentOverride ?? null,
           radarrSettingsId: params.radarrSettingsId ?? null,
           sonarrSettingsId: params.sonarrSettingsId ?? null,
           radarrQualityProfileId: params.radarrQualityProfileId ?? null,
           sonarrQualityProfileId: params.sonarrQualityProfileId ?? null,
-          visibleOnRecommended: params.collection?.visibleOnRecommended,
-          visibleOnHome: params.collection?.visibleOnHome,
+          // If the collection block is left out of an update, keep the saved
+          // values instead of sending undefined — otherwise we'd unlink a manual
+          // collection or switch off Plex visibility.
+          visibleOnRecommended:
+            params.collection?.visibleOnRecommended ??
+            dbCollection?.visibleOnRecommended,
+          visibleOnHome:
+            params.collection?.visibleOnHome ?? dbCollection?.visibleOnHome,
           deleteAfterDays: params.collection?.deleteAfterDays ?? null,
-          manualCollection: params.collection?.manualCollection,
-          manualCollectionName: params.collection?.manualCollectionName,
-          keepLogsForMonths: +params.collection?.keepLogsForMonths,
+          manualCollection:
+            params.collection?.manualCollection ??
+            dbCollection?.manualCollection,
+          manualCollectionName:
+            params.collection?.manualCollectionName ??
+            dbCollection?.manualCollectionName,
+          keepLogsForMonths: params.collection?.keepLogsForMonths ?? 6,
           sortTitle: params.collection?.sortTitle,
           mediaServerSort: params.collection?.mediaServerSort ?? null,
           overlayEnabled: params.collection?.overlayEnabled,
@@ -625,7 +652,7 @@ export class RulesService {
     } catch (error) {
       this.logger.warn('Rules - Action failed');
       this.logger.debug(error);
-      return undefined;
+      return this.createReturnStatus(false, 'Failed to save the rule group');
     }
   }
   async setExclusion(data: ExclusionContextDto) {

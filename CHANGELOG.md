@@ -1,6 +1,40 @@
-# [3.13.0](https://github.com/Maintainerr/Maintainerr/compare/v3.12.1...v3.13.0) (2026-05-28)
+# [3.14.0](https://github.com/Maintainerr/Maintainerr/compare/v3.13.0...v3.14.0) (2026-06-05)
 
-# PLEASE NOTE:
+
+## Highlights
+- Added `/api/health` endpoints with liveness and readiness checks for monitoring and integration with tools like Kubernetes and Docker Compose (#3029).
+- Collection handler now skips media currently being streamed to avoid disrupting active viewers (#3027).
+- Fixed issue where saving log settings would overwrite an active `LOG_LEVEL` environment variable override (#3053).
+
+## Features
+- Added `/api/health` endpoints with liveness and readiness checks (#3029).
+- Collection handler now skips media currently being streamed (#3027).
+- Logging system now honors the `LOG_LEVEL` environment variable on startup (#3030).
+
+## Fixes
+- Fixed issue where saving log settings would overwrite an active `LOG_LEVEL` environment variable override (#3053).
+- Validated webhook URL schemes to prevent invalid or potentially harmful requests (#3031).
+- Fixed issue where rule groups lost collection links and visibility on partial updates (#3045, #3046).
+- Fixed issue with manual collections not being found across libraries on Jellyfin/Emby (#3026, #3042).
+- Resolved issue where deleted media remained stuck in Jellyfin/Emby collections and caused repeated processing errors (#3023, #3024, #3040).
+- Fixed issue where Seerr requests for episode rules incorrectly deleted entire season requests (#3015).
+- Improved error notifications for collection handling failures to include the name of the failing collection (#3013).
+- Used Radarr bulk exclusions endpoint to avoid duplicate 400 errors when adding exclusions (#3012).
+
+## Performance
+- Pruned media that no longer exists on the media server to improve collection handling efficiency (#3023, #3040).
+
+## Internal
+- Refreshed README with updated features, deployment examples, and credits (#3048).
+- Clarified that a missing `yarn` command indicates a stale `node_modules` directory.
+
+## Dependencies
+- Updated 20 dependencies, including `@typescript-eslint/parser`, `react-router-dom`, `axios`, and `vite`.
+
+## New Contributors
+* @Arvuno made their first contribution in https://github.com/Maintainerr/Maintainerr/pull/3029
+
+# [3.13.0](https://github.com/Maintainerr/Maintainerr/compare/v3.12.1...v3.13.0) (2026-05-28)
 
 ## Global vs scoped exclusions
 
@@ -12,44 +46,44 @@ Per-group exclusions used to hide an item in every group. They now apply only to
 
 ## Rule section operators
 
-A section without an operator used to be treated as AND; it's now OR, which is what we always meant. Existing rules are migrated automatically so they keep evaluating the same way.
+A section without an operator used to be treated as AND; it's now OR instead. Existing rules are migrated automatically so they keep evaluating the same way.
 
 If a multi-section rule wasn't matching as you expected, this is probably why. The operator between sections is now visible in the rule editor, and new rules need an explicit operator on every section after the first.
 
-This migration is not reversible.
+**This migration is not reversible.**
 
 ## Highlights
-- Added metadata fallback for rules when series are absent from Sonarr, improving rule evaluation reliability (#3002).
-- Introduced Streamystats watchlist rule properties for Jellyfin, enabling watchlist-based rule creation (#2977).
+- Added metadata fallback for rules when series are absent from Sonarr, using the configured metadata provider (#3002).
+- Introduced Streamystats watchlist rule properties for Jellyfin, enabling watchlist-based rules (#2977).
 - Fixed OR rule sections incorrectly evaluated as AND due to operator coercion, ensuring accurate rule logic (#2971).
+- Scoped exclusions to their rule group under TypeORM 1.0, resolving latent bugs (#2991).
 
 ## Features
-- Added Plex "Amount of episodes marked as watched" rule (#2975).
+- Added Plex rule for "Amount of episodes marked as watched" (#2975).
 - Added Streamystats watchlist rule properties for Jellyfin (#2977).
-- Adopted Tailwind CSS v4 and its new features, including container queries and dark mode enhancements.
+- Adopted Tailwind CSS v4 and implemented related UI enhancements.
 
 ## Fixes
 - Fixed OR rule sections incorrectly evaluated as AND due to operator coercion (#2971).
-- Scoped exclusions to their rule group under TypeORM 1.0, resolving latent bugs (#2991).
 - Prevented Plex auth drop when plex.tv is unreachable (#2996).
-- Improved rule import robustness for YAML and community rules across media servers (#2976, #2986).
-- Resolved HTTP 414 errors when creating large collections by batching item additions (#3001).
-- Fixed navigation issues in the UI's global-exclusion warning links.
+- Improved rule import robustness for YAML and community rules across media servers (#2986, #2976).
+- Fixed HTTP 414 errors when creating large collections by batching item additions (#3001).
+- Resolved navigation issues in the UI for global-exclusion warning links.
 - Omitted empty Discord embed thumbnails to prevent webhook failures.
-- Addressed styling issues and unary-rule crashes in the Test Media search field (#2978).
+- Fixed styling and crash issues in Test Media search and unary-rule comparisons (#2978).
 
 ## Performance
 - Improved cache hygiene for external API and metadata responses (#2972).
 
 ## Database migrations
-- Backfilled `operator` field for rules with null values, ensuring explicit AND/OR logic without altering existing behavior.
+- Backfilled the `operator` field in stored rules where it was previously null, ensuring explicit AND/OR values for accurate rule evaluation.
 
 ## Internal
 - Refactored shared media getter rule helpers to reduce duplication (#2922).
 - Unified form field styling into a single source for consistency.
 
 ## Dependencies
-- Updated 14 dependencies, including @typescript-eslint/eslint-plugin, typeorm, and react-hook-form.
+- Updated 14 dependencies, including notable packages like `typeorm`, `@tanstack/react-query`, and `@typescript-eslint/eslint-plugin`.
 
 ## New Contributors
 * @stormshaker made their first contribution in https://github.com/Maintainerr/Maintainerr/pull/2972
